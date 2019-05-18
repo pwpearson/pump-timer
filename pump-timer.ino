@@ -34,7 +34,7 @@ volatile boolean pumpTimerIsOn = false;
 ThreadController control1 = ThreadController();
 
 /*
- * PumpTimerThread inherits Thred
+ * PumpTimerThread inherits Thread
  */
 class PumpTimerThread: public Thread{
   public:
@@ -98,12 +98,12 @@ void setup() {
 
   // config pump run thread (button)
   runPumpThread.onRun(pumpRunCallback);
-  runPumpThread.setInterval(1000);
+  runPumpThread.setInterval(500);
   digitalWrite(pumpPin, LOW);
 
   // config pump timer stop/start thread (button)
   startStopPumpTimerThread.onRun(pumpTimerStartStopCallback);
-  startStopPumpTimerThread.setInterval(1000);
+  startStopPumpTimerThread.setInterval(500);
 
   autoRunTimeThread.onRun(autoRunTimeCallback);
   autoRunTimeThread.setInterval(pumpOnTime);
@@ -203,6 +203,9 @@ void threadTimerCallback(){
  */
 void timerToggle(){
   Serial.println("Auto Time Button Pressed");
+  if(pumpIsOn) 
+    pumpToggle();
+  
   requestTimerOn = !requestTimerOn;
 }
 
@@ -213,6 +216,9 @@ void timerToggle(){
  */
 void pumpToggle(){
   Serial.println("Pump Button Pressed");
+  if(pumpTimerIsOn) 
+    timerToggle();
+  
   requestPumpOn = !requestPumpOn;
 }
 
