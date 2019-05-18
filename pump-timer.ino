@@ -11,22 +11,25 @@
 
 // millis
 const int pumpOnTime = 5000; //5s
-const int pumpOffTime = 5000; //15s
+const int pumpOffTime = 10000; //5s
 //const int pumpOnTime = 45000; //45s
 //const int pumpOffTime = 5400000; //1.5hr
 
 const int interruptPumpTogglePin = 2;
 const int interruptTimerTogglePin = 3;
 
-const int lowFloatPin = 10;
-const int pumpPin = 9;
+const int pumpTimerLED = 4;
 
+const int lowFloatPin = 11;
+const int pumpPin = 12;
+                                                                                                      
 // micros
 const int threadTimerTime = 20000;
 
-volatile boolean timerIsOn = false;
+volatile boolean requestTimerOn = false;
+volatile boolean requestPumpOn = false;
 volatile boolean pumpIsOn = false;
-
+volatile boolean pumpTimerIsOn = false;
 
 ThreadController control1 = ThreadController();
 
@@ -40,7 +43,31 @@ class PumpTimerThread: public Thread{
           }
 };
 
+class LowFloatSensorThread: public Thread{
+  public:
+          byte value;
+          int pin;
+
+          void run(){
+
+            value = digitalRead(lowFloatPin);
+            runned();
+          }
+};
+
+class AutoRunTimeThread: public Thread{
+  public:
+          void reset(){
+            runned();
+          }
+};
+
+
 PumpTimerThread pumpTimerThread = PumpTimerThread();
+LowFloatSensorThread lowFloatSensorThread = LowFloatSensorThread();
+Thread runPumpThread = Thread();
+Thread startStopPumpTimerThread = Thread();
+AutoRunTimeThread autoRunTimeThread = AutoRunTimeThread();
 
 /*
  * setup
@@ -53,22 +80,46 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(lowFloatPin, INPUT);
   pinMode(pumpPin, OUTPUT);
+  pinMode(pumpTimerLED, OUTPUT);
 
-  attachInterrupt(digitalPinToInterrupt(interruptTimerTogglePin), timerToggle, LOW);
-  attachInterrupt(digitalPinToInterrupt(interruptPumpTogglePin), pumpToggle, LOW);
+  attachInterrupt(digitalPinToInterrupt(interruptTimerTogglePin), timerToggle, RISING);
+  attachInterrupt(digitalPinToInterrupt(interruptPumpTogglePin), pumpToggle, RISING);
   
   delay(1000);
 
+  // config pump timer thread
   pumpTimerThread.onRun(pumpTimerCallback);
   pumpTimerThread.setInterval(pumpOffTime);
+  pumpTimerThread.enabled = false;
+  digitalWrite(pumpTimerLED, LOW);
 
+  lowFloatSensorThread.pin = lowFloatPin;
+  lowFloatSensorThread.setInterval(5000);
+
+  // config pump run thread (button)
+  runPumpThread.onRun(pumpRunCallback);
+  runPumpThread.setInterval(1000);
+  digitalWrite(pumpPin, LOW);
+
+  // config pump timer stop/start thread (button)
+  startStopPumpTimerThread.onRun(pumpTimerStartStopCallback);
+  startStopPumpTimerThread.setInterval(1000);
+
+  autoRunTimeThread.onRun(autoRunTimeCallback);
+  autoRunTimeThread.setInterval(pumpOnTime);
+  autoRunTimeThread.enabled = false;
+
+  // register threads with controller
   control1.add(&pumpTimerThread);
+  control1.add(&runPumpThread);
+  control1.add(&startStopPumpTimerThread);
+  control1.add(&lowFloatSensorThread);
+  control1.add(&autoRunTimeThread);
 
+  // config and start timer to run threads
   Timer1.initialize(threadTimerTime);
   Timer1.attachInterrupt(threadTimerCallback);
   Timer1.start();
-
-  digitalWrite(pumpPin, LOW);
 
   Serial.println("Starting Pump Timer");
 }
@@ -87,7 +138,51 @@ void loop() {
  * 
  */
 void pumpTimerCallback(){
-  autoPump(pumpPin, pumpOnTime);
+  
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  if(lowFloatSensorThread.value == HIGH){
+    Serial.println("Auto Time Pump Start");
+    pumpOn(pumpPin);
+    autoRunTimeThread.enabled = true;
+    autoRunTimeThread.reset();
+  }
+  else{
+    Serial.println("Nothing to pump.");
+  }
+}
+
+void autoRunTimeCallback(){
+
+  pumpOff(pumpPin);
+  autoRunTimeThread.enabled = false;
+  digitalWrite(LED_BUILTIN, LOW);
+}
+
+/*
+ * pumpRunCallback
+ */
+void pumpRunCallback(){
+
+  if(!pumpTimerIsOn){
+    if(requestPumpOn){
+      pumpOn(pumpPin);
+    }
+    else{
+      pumpOff(pumpPin);
+    }
+  }
+}
+
+/*
+ * pumpTimerStartStopCallback
+ */
+void pumpTimerStartStopCallback(){
+
+  if(requestTimerOn)
+    pumpTimerOn();
+  else
+    pumpTimerOff();
 }
 
 /*
@@ -107,16 +202,8 @@ void threadTimerCallback(){
  * turns the pump timer on/off
  */
 void timerToggle(){
-
-  timerIsOn = !timerIsOn;
-
-  if(timerIsOn){
-    pumpTimerThread.reset();
-    pumpTimerThread.enabled = true;
-  }
-  else{
-    pumpTimerThread.enabled = false;
-  }
+  Serial.println("Auto Time Button Pressed");
+  requestTimerOn = !requestTimerOn;
 }
 
 /*
@@ -125,54 +212,35 @@ void timerToggle(){
  * manually turn pump on/off
  */
 void pumpToggle(){
-
-  pumpIsOn = !pumpIsOn;
-
-  if(pumpIsOn)
-    pumpOn(pumpPin);
-  else
-    pumpOff(pumpPin);
+  Serial.println("Pump Button Pressed");
+  requestPumpOn = !requestPumpOn;
 }
 
 /*
- * autoPump
- * 
- * runs pump based on low float state and time interval
- * onTime in millis
- * 
+ * pumpTimerOn
  */
-void autoPump(int pumpPin, int onTime){
-
-  Serial.print("OnPump(s): ");
-  Serial.println(onTime/1000);
-
-  byte lowFloatState = digitalRead(lowFloatPin);
-  
-  digitalWrite(LED_BUILTIN, HIGH);
-
-  if(lowFloatState == HIGH)
-    runPump(pumpPin, onTime);
-  else{
-    Serial.println("Nothing to pump.");
+void pumpTimerOn(){
+  if(!pumpTimerIsOn){
+    pumpTimerIsOn = true;
+    Serial.println("Pump Timer is On");
+    pumpTimerThread.reset();
+    pumpTimerThread.enabled = true;
+    digitalWrite(pumpTimerLED, HIGH);  
   }
-  
-  digitalWrite(LED_BUILTIN, LOW);  
 }
 
 /*
- * runPump
- * 
- * run pump for specified millis
- * runTime in millis
- * 
+ * pumpTimerOff
  */
-void runPump(int pumpPin, int runTime){
-
-  pumpOn(pumpPin);
-  long t = millis();
-  while(millis() - t <= runTime) { }
-  pumpOff(pumpPin);    
+void pumpTimerOff(){
+  if(pumpTimerIsOn){
+    pumpTimerIsOn = false;
+    Serial.println("Pump Timer is Off");
+    pumpTimerThread.enabled = false;
+    digitalWrite(pumpTimerLED, LOW);  
+  }
 }
+
 
 /*
  * pumpOn
@@ -181,8 +249,11 @@ void runPump(int pumpPin, int runTime){
  * 
  */
 void pumpOn(int pumpPin){
-  Serial.println("Pump On");
-  digitalWrite(pumpPin, HIGH);  
+  if(!pumpIsOn){
+    pumpIsOn = true;
+    Serial.println("Pump On");
+    digitalWrite(pumpPin, HIGH);
+  }  
 }
 
 /*
@@ -192,6 +263,9 @@ void pumpOn(int pumpPin){
  * 
  */
 void pumpOff(int pumpPin){
-  digitalWrite(pumpPin, LOW);
-  Serial.println("Pump Off");    
+  if(pumpIsOn){
+    pumpIsOn = false;
+    digitalWrite(pumpPin, LOW);
+    Serial.println("Pump Off");    
+  }
 }
